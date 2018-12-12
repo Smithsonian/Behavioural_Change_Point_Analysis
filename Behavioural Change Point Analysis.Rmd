@@ -1,0 +1,303 @@
+---
+title: Identifying Ecologically Relevant Phases of Movement Behaviour From Tracking
+  Data
+author: "John McEvoy (Adapted from code by Eli Gurarie - Gurarie et al 2011)"
+date: "October 30, 2017"
+output:
+  
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+A central challenge in movement ecology is inferring animal behaviours from remotely sensed tracking data.  It is now possible to track movements of animals at fine temporal scales across vast and inaccessible areas, where behavioural observations would be impossible. This allows researchers to not only see where animals go, but, by analysing the characteristics of their movement such as velocity, directedness or tortuosity, to identify shifts between phases of ecologically relevant behaviour and the scales on which these occur. 
+There are many methods available for identifying types of movement behaviour and delineating distinct phases of movement from animal tracking data. Here we will explore one such method using a simple worked example. 
+
+## Behavioural change Point Analysis
+This code is a modification of code provided by Eli Gurarie for running Behavioural Change Point Analysis (BCPA) in R
+As described in Gurarie et al 2009 : <http://onlinelibrary.wiley.com/doi/10.1111/j.1461-0248.2009.01293.x/abstract>.
+In short, what we are trying to do is to identify abrupt changes in the movement behaviour of an animal through time. 
+We will do this by looking at some of the fundamental properties of the movement path. The step length, turning angle, velocity and the spatial auto-correlation between the points.  
+It is important to note at the beginning that BCPA will identify change points in the movement path but characterising what those changes mean in terms of an animal's ecology is down to you. There are many other methods out there to do this kind of partitioning but this is a pretty user friendly place to start. 
+If you are keen to see how it can be taken a step further, this paper is a worth a look: <http://journals.plos.org/plosone/article?id=10.1371/journal.pone.0122811>  
+
+In this example we are going to look at the movement path of a cow  in the tropical grassland of Western Australia, over the course of a single day.The temporal scale of your analysis can vary from fine scale movements like this, to longer term patterns of movement across seasons or even years.  
+
+<img src="Cow Collar.jpg" width="200" height="200" /> <img src="Kimberley Scenery.jpg" width="300" height="300" />  
+
+<img src="Cow Track.jpg" width="600" height="400" />
+
+
+
+##Getting the data into R
+
+Let's start by setting our working directory, where all of our input and output will be located. We do this using the `setwd` function below. This is 'commented out' of the code with a `#` because the directory filepath might be different for each of you. Remove the `#` from the front of `setwd` and type in the correct filepath pointing to where you downloaded the data and scripts. Pay attention to the syntax, you need to enclose the filepath in `""` and `/` symbols are used **not** `\` like in Windows. 
+Next we will install the `bcpa` package. Once again the `install.packages` function is commented out here. Remove the `#` and install the `bcpa` package.
+
+```{r libraries, message=FALSE, warning=FALSE, results=FALSE}
+#Find out what your working directory currently is
+getwd()
+
+#if necessary, set your working directory to whatever folder contains the data and scripts using the 'setwd' function
+#notice that "/" is ued to separate the directories NOT "\" so if you copy and paste the address make sure to change those!
+
+#setwd("C:/desktop/whatever/whatever")
+
+
+#install the required package. 
+
+
+install.packages("bcpa")
+
+#load the package
+require(bcpa)
+
+
+```
+
+
+Lastly, we read in the data file itself and some R functions we will need later.
+```{r getdata, message=FALSE, warning=FALSE}
+
+
+#I normally start by reading in the complete data set and then selecting one animal
+#Read in "All Animals" data 
+
+Data<-read.csv("Cow  BCPA.csv", na.strings="NA")
+
+#select individual animals by ID
+#In this case the data set has only one animal(collar number 129) but it is good to see how it works
+mydata<-Data[Data$ID==129,]
+
+#View the data to see if it looks right
+head(mydata)
+
+#Slect the columns that are of use for this analysis
+mydata<-mydata[,c("timestamp","Lat","Lon","ID")]
+
+
+#Rename columns in dataframe, BCPA requires the column names below
+names(mydata)<-c("Time", "Y", "X","ID" )
+
+#Format "Time" as a POSIXct object to make it easier to deal with as a time series 
+#the format given here must match exactly the format in the original data
+
+Da<-strptime(mydata$Time,format='%d/%m/%Y %H:%M', tz="GMT")
+Da<-as.POSIXct(Da)
+mydata$Time<-Da
+
+#Check that the "Time" column looks okay and the formatting and time zone are correct
+head(mydata$Time)
+
+#Read in some plotting functions that I have tweaked for our purposes
+source("BCPA_Functions.R")
+```
+
+##Creating a time series
+
+The next step is to calculate the properties of the time series. The `GetVT` function provides a dataframe of step lengths, velocities, etc. To get a better understanding of what this function does try typing: `?GetVT`
+
+```{r timeseries}
+AnimalVT<-GetVT(mydata, units="hour")
+
+head(AnimalVT)
+```
+
+##Identifying change points
+The `WindowSweep` function is the main component of the BCPA analysis. 
+Here we sweep a moving window over the data to detect abrupt changes in the properties of the movement path. To do this we first use the `AnimalVT` object created above to generate a time series of a variable called "persistence velocity (PV)". PV is signified in the code below as  `V*Cos(Theta)` and it represents the tendency and magnitude of a movement to persist in a given direction. There are other variables we could explore but I will leave that for you to look into. 
+
+The size of the window we sweep over the timeseries is given in number of fixes (not time). For a sampling schedule of 1 fix every 10 minutes, a window size of 12 means 12 fixes = 2hrs (assuming perfect fix acquisition every 10mins).
+The `WindowSweep` function will now move a window 12-fixes wide along each point in the time series and determine if the properties of persistence velocity have changed within that window. It does this by testing a series of models and using maximum likelihood techniques (in this case BIC) to determine which model is the most parsimonious. 
+The properties of the time series that are important are:
+
+**mu.hat** = Mean PV= mean persistence velocity  within the window  
+**s.hat** = Variance in PV =  variability of PV within the window  
+**rho.hat** = Spatial auto-correlation within the window  
+
+The eight models assessed at each potential changepoint by `windowsweep` are as follows:
+
+**M0 = No change in any property (null hyptothesis)**  
+**M1= mean PV changes only**  
+**M2= variance changes only**  
+**M3= autocorellation changes only**  
+**M4= mean PV and variance change**  
+**M5= mean PV and autocorellation change**  
+**M6 = variance and autocorellation change**  
+**M7 = All three properties change**  
+
+You will notice that it does not care if the change is positive or negative, it is only detecting changepoints. 
+
+
+In the code below `system.time` is used for counting how long the operation takes. The argument `progress` gives us progress bar. This can be helpful when analyzing a big data set and you are not sure if R is working on it or not. 
+`Plotme` must be FALSE if using R studio.The argument `K` is a measure of how sensitive the analysis is in terms of deciding which model to select, the less sensitive the analysis the more likely a null model will be selected. A value of 2 is normal, 0.5 is very insensitive. This could be useful for example if you are looking only for very crude changes in behaviour over a long time period. The `tau` argument is used to specify whether you want to use 'characteristic time' or auto-correlation in the analysis. We will just focus on auto-correlation for now.
+
+```{r WindowSweep}
+
+
+system.time(Animal.ws<-WindowSweep(AnimalVT,"V*cos(Theta)",windowsize=12,  progress=FALSE,  plotme=FALSE, K=2, tau=FALSE))
+
+
+
+```
+
+##Plotting the output
+
+The standard plotting function is called `plot.bcpa`. I have tweaked the code slightly  and created `bcpa.plot` to make what I think is a better graph. You can try them both to see what you think. The graph can be plotted as `flat` or `smooth` (with smoothing of values between points). Here we use `flat` so we can see the abrupt changes in a graphical way. The `clusterwidth` argument tells the function to group change points that were detected within a certain distance from each other (default =1). The arguments `rho.where` and `mu.where` are for placing the legend if you want one. If you don't you can set this argument to 'nowhere' 
+
+
+
+```{r plotBCPA}
+#plot outputs as "flat", ie.: without any smoothing between each point. Time needs to be a POSIXct object
+#clusterwidth tells the function to group change points that were detected within a certain distance from each other. default =1
+#"rho.where" and "mu.where" are for placing the legend if you want one.
+bcpa.plot(Animal.ws, type="flat",ylab="Persistence Velocity",xlab="Time", clusterwidth=1, rho.where='topright', mu.where="topright")
+
+```
+
+You should be aware that all of the measures can be affected by the number of points that there are within each window.  e.g. If there are only two points to work with the variance could be a lot higher than expected if they are very different. Try re-running the `windowsweep` function with a different windowsize or K value and see how that changes your graph.
+
+Once we have plotted the time series we can also plot the movement path in space coloured by increasing PV. The absolute values are not important here and will vary between species. This graph is good for getting a spatial representation of where the behaviours have occurred.
+
+```{r PathPlotPersist}
+PathPlot.Persistence(mydata, Animal.ws, plotlegend=TRUE)
+```
+
+Take a look back at the satellite image at the top of the page. The cow is showing a drop off in PV when it reached a point near the centre of the map. What do you think is happening here? At what time of day did this occur?
+
+Do you think it would be useful to plot other variables along the movement path? 
+
+
+##Creating a summary of change points
+The function `ChangePointSummary` will output an object called `changes` that contains a table of change points and a table of phases. The `changes` table tells you what points in time the behaviour changed and what model was selected in classifying that change (see column `modelmode`).The change points are selected based on differences in three key parameters within each window as mentioned above.  
+The `phases` object shows the phases that delineated by the change points and what the properties are inside each phase. This can be used to help you interpret exactly how the movement behaviour changed between phases. Interpreting what these changes and phases mean for the animal will require looking at the graph of the time series and some knowledge of your study species' movement behaviour. For example a big increase in `mu.hat` indicates a change to faster more directed movement, an increase in `s.hat` corresponds to more variable movement (lots of stopping and starting and changing direction). A higher `rho.hat` indicates more directed and correlated movements, whether fast or slow. Read Gurarie et al, 2009 for detailed explanations.  
+
+
+```{r changepoints}
+changes<-ChangePointSummary(Animal.ws, tau=FALSE)
+#how many change points are there?
+length(changes$breaks$size)
+changes
+
+```
+
+
+
+What does the `changes` object tell you about the different phases? What model was selected at each change point? What does that mean?
+We can create a  data frame that shows how the values of the three parameters changed from one phase to the next. This object will be called `phases`. The first row will have no data because  it is the first phase, there is nothing to compare it to, so we put in a dummy row with values "9999".
+
+```{r phases}
+
+phases<-changes$phases
+
+# the first phase has nothing to compare to
+Start<-9999
+
+#create a column showing how 'mu.hat' has changed between each phase
+mu.diff<-  diff(changes$phases$mu.hat, lag=1)
+                                     
+mu.diff<-c(Start, mu.diff)
+
+phases<- cbind(phases, mu.diff)
+
+#do the same for 's.hat'
+s.diff<- diff(phases$s.hat, lag=1)
+                                   
+s.diff<-c(Start, s.diff)
+
+phases<- cbind(phases, s.diff)
+
+#and finally for 'rho'
+
+rho.diff<- diff(phases$s.hat, lag=1)
+                                   
+rho.diff<- c(Start, rho.diff)
+
+phases<- cbind(phases, rho.diff)
+
+#check the data frame
+head(phases)
+
+```
+
+Next we create a data frame of the change points and merge it with a data frame of identified phases.
+As above, the first row will have no data because  it is the first phase, there is nothing to compare it to
+so we put in a dummy row with values "9999"
+
+```{r changes}
+breaks<-changes$breaks
+breaks<-breaks[,2:5]
+Start<-data.frame(middle=9999, size=9999,modelmode=9999,middle.POSIX=AnimalVT$T.POSIX[1])
+
+
+breaks<-rbind(Start,breaks)
+
+
+Breaks_and_Phases<-cbind(phases, breaks)
+Breaks_and_Phases
+```
+
+We can use a series of `ifelse` statements to classify behavioural phases based on changes in the movement parameters, or on their absolute values. One way to help with deciding where to set these cut of points is to use one individual that has very clear cut and obvious movement patterns as a template for the others (what we did here) or you could also create sets of simulated data with properties that you would expect during different movement types and tweak these `ifelse` statements until they correctly classify your simulated data, before running them on the real data.  
+In the code below we say that if the difference in mean PV (`mu.diff`) from one phase to another is more than 2 times the mean value of `mu.hat` for this animal, then this probably represents a shift to rapid and direct movement. Other behavioural types are classified based on varaiance in PV (`s.hat`). These distinctions can be made as detailed or as crude as you see fit depending on what your question is. 
+
+```{r classify}
+phases$Behaviour<-0                        
+phases$Behaviour<-ifelse(phases$s.diff==9999 & phases$mu.diff==9999 & phases$rho.diff==9999,"Start of Day",
+                            ifelse(phases$mu.diff> (2*mean(phases$mu.hat)),"Direct Movement" ,     
+                                   ifelse(phases$s.diff>0.002  & phases$mu.diff>0.0001, "Foraging and Moving", 
+                                          ifelse(phases$s.hat>0.001  & phases$mu.hat>0 , "Slow Foraging",
+                                                 
+                                                 ifelse(phases$s.hat>0.001  & phases$mu.diff<0 , "Slow Foraging",    
+                                                        
+                                                        ifelse(phases$mu.hat<0.001 & phases$s.hat<0.001, "Sedentary","Unclassified"))))))
+
+
+head(phases$Behaviour,20)   
+phases$Behaviour<-as.character(phases$Behaviour)
+phases$Behaviour[is.na(phases$Behaviour)]<-"NA"
+
+#a further series of classifiers for those phases at the start of each day
+#detecting changes is not possible because we don't know what came before
+#so we classify these based on absolute values of the three parameters
+
+phases$Behaviour[phases$Behaviour=="Start of Day"]<-ifelse(phases$mu.hat[phases$Behaviour=="Start of Day"] >(2*mean(phases$mu.hat)) ,"Direct Movement",
+                                                                 ifelse(phases$s.hat[phases$Behaviour=="Start of Day"]>0.001  & phases$mu.hat[phases$Behaviour=="Start of Day"]>0 , "Slow Foraging",
+                                                                        ifelse(phases$mu.hat[phases$Behaviour=="Start of Day"] >(1*mean(phases$mu.hat)) &  phases$s.hat[phases$Behaviour=="Start of Day"]<mean(phases$s.hat), "Foraging and Moving" ,  
+                                                                               
+                                                                               ifelse(phases$mu.hat[phases$Behaviour=="Start of Day"]<0.001 & phases$s.hat[phases$Behaviour=="Start of Day"]<0.001, "Sedentary", "Unclassified"))))    
+
+#add the timestamps for each phase form the 'breaks and phases' object above
+phases$Time<-Breaks_and_Phases$middle.POSIX
+
+head(phases,20)
+
+```
+
+Now that we have a breakdown of when each phase starts and the next begins we can pull that information and add it to the main data frame.
+
+```{r phase_lookup}
+#A series of "if else" statements to select the correct behavioural phase and add it to the main data set                      
+mydata$Behaviour<-0                        
+mydata$Behaviour<-ifelse(mydata$Time<=phases$Time[1],phases$Behaviour[1],
+                            ifelse(mydata$Time<=phases$Time[3]& mydata$Time >phases$Time[1],phases$Behaviour[2] ,     
+                                   ifelse(mydata$Time<=phases$Time[4]& mydata$Time > phases$Time[3],phases$Behaviour[3], 
+                                          ifelse(mydata$Time<=phases$Time[5]& mydata$Time >phases$Time[4],phases$Behaviour[4],
+                                                 ifelse(mydata$Time>=phases$Time[5],phases$Behaviour[5], "Unclassified")))))
+
+head(mydata)
+
+#take the "Behaviour" column we just created and append it to the raw data from the begining
+
+Data$Behaviour<-mydata$Behaviour
+
+#view the results
+head(Data)
+
+#write out the results as a CSV file
+write.csv(Data, "A Day In The Life Of A Cow.csv", row.names=FALSE)
+```
+
+Looking at the final data set, what do you think is the next step in this analysis?
+
